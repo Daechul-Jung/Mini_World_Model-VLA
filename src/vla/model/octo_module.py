@@ -166,7 +166,73 @@ class OctoTransformer(nn.Module):
         ## Task tokenizer to prefix groups
         for name, token in self.task_tokenizers.items():
             group_name = f'task_{name}'
-            token_group: TokenGroup = token(observations, tasks, train=train)
-            if token_group is None:
+            task_group: TokenGroup = token(observations, tasks, train=train)
+            if task_group is None:
                 logging.warning(f'Skipping task tokenizer: {group_name}')
                 continue
+
+            proj = self._get_or_make_proj(group_name)
+            task_tokens = proj(task_group.tokens) ## [B, num_tokens, D]
+            task_tokens = task_tokens + self._pos_embed_prefix(group_name, task_tokens)
+            
+            all_prefix_groups.append(
+                PrefixGroup(
+                    tokens = task_tokens,
+                    mask = task_tokens.mask.to(torch.bool),
+                    name= group_name,
+                    attention_rules=task_attention_rules
+                )
+            )
+
+        ## Observation tokenizers to timestep groups
+        for name, token in self.observation_tokenizers.items():
+            group_name = f'obs_{name}'
+            obs_group: TokenGroup = token(observations, tasks, train = train)
+            if obs_group is None:
+                logging.warning(f'Skipping observaiton tokenizer: {group_name}')
+                continue
+
+            proj = self._get_or_make_proj(group_name)
+            obs_tokens = proj(obs_group.tokens)  ## [B, timestep, num_tokens, D] D for token dim
+            obs_tokens = obs_tokens + self._pos_embed_timestep(group_name, obs_tokens)
+
+            ## Combine tokenizer mask with timestep_pad_mask (but why?)
+            obs_pad_mask = (timestep_pad_mask[:, :, None] & obs_group.mask.to(torch.bool)) # [B, timestep, num_tokens]
+
+            all_timestep_groups.append(
+                TimestepGroup(
+                    tokens = obs_tokens,
+                    mask = obs_pad_mask,
+                    name = group_name,
+                    attention_rules=observation_attention_rules
+                )
+            )
+
+        if self.repeat_task_tokens and len(all_prefix_groups) > 0:
+            logging.info("repeating task tokens at each timestep to perform cross-modal attention")
+            T = all_timestep_groups[0].tokens.shape[1]
+            for pg in all_prefix_groups:
+                # pg.tokens: [B, num_tok, D] to [B, T, num_tok, D]
+                rep_tok = pg.tokens.unsqueeze(1).expand(-1, T, -1, -1)
+                rep_mask = pg.mask.unsqueeze(1).expand(-1, T, -1)
+                group_name = f"obs_{pg.name}"
+                all_timestep_groups.append(TimestepGroup(
+                    tokens=rep_tok,
+                    mask=rep_mask,
+                    name=group_name,
+                    attention_rules=observation_attention_rules,
+                ))
+
+        ### readout tokens to timestep groups
+        for readout_name in readouts:
+            group_name = f'readout_{readout_name}'
+            num_tokens = int(self.readout_cfg[readout_name])
+            readout_tokens = torch.zeros(
+                (B, horizon, num_tokens, self.token_embedding_size),
+                device = timestep_pad_mask.device,
+                dtype = timestep_pad_mask.dtype if timestep_pad_mask.dtype.is_floating_point else torch.float32
+            )
+
+            readout_tokens = readout_tokens + self._pos_embed_timestep(group_name, readout_tokens)
+            readout_mask = torch.ones((B, horizon, num_tokens), device = timestep_pad_mask.device, dtype = torch.bool)
+            
