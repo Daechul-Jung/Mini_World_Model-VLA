@@ -2,7 +2,7 @@ from enum import Enum
 from fnmatch import fnmatch
 from dataclasses import dataclass
 import logging 
-from typing import Any, Dict, Mapping, Sequence, Tuple, Union, Optional, List
+from typing import Any, Dict, Mapping, Sequence, Tuple, Union, Optional, List, Callable
 
 import einops
 import torch
@@ -127,6 +127,7 @@ class BlockTransformer(nn.Module):
     """
     def __init__(self, transformer_kwargs: Dict, enforce_causal: bool = True, use_correct_attention: bool = False):
         super().__init__()
+        # self.transformer_builder = transformer_builder
         self.transformer_kwargs = transformer_kwargs
         self.enforce_causal = enforce_causal
         self.use_correct_attention = use_correct_attention
@@ -179,6 +180,9 @@ class BlockTransformer(nn.Module):
         attention_mask = attention_mask.squeeze(1).bool()
         ## Sows attention mask for ease of retrieval when debugging -> This part exists in original code(flax) but not in pytorch
 
+
+        # if self.transformer is None:
+        #     self.transformer = self.transformer_builder(token_dim)
         if self.transformer is None:  ## Need to figure out how to replace this code
             self.transformer = Transformer(**self.transformer_kwargs)
 
@@ -386,3 +390,41 @@ class BlockTransformer(nn.Module):
         logging.warning(" | ".join([" "] + cols))
         for r in rows:
             logging.warning(" | ".join(r))
+
+class TransformerWithFullMask(nn.Module):
+    def __init__(self, num_layers: int, Token_dim: int, num_heads: int, mlp_dim: int, dropout: float=0.1, attn_dropout: float=0.1):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                "ln1": nn.LayerNorm(Token_dim),
+                "attn": nn.MultiheadAttention(Token_dim, num_heads, dropout=attn_dropout, batch_first=True),
+                "ln2": nn.LayerNorm(Token_dim),
+                "mlp": nn.Sequential(
+                    nn.Linear(Token_dim, mlp_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(mlp_dim, Token_dim),
+                    nn.Dropout(dropout),
+                )
+            }) for _ in range(num_layers)
+        ])
+
+    def forward(self, x: torch.Tensor, attn_allowed: Optional[torch.Tensor], train: bool) -> torch.Tensor:
+        """
+        x: [B, Time_dim, Token_dim]
+        attn_allowed: [B, Time_dim, Time_dim] bool (True=allowed), or None
+        """
+        # Convert to PyTorch's attn_mask convention: True = MASK (disallowed)
+        attn_mask = None
+        if attn_allowed is not None:
+            attn_mask = ~attn_allowed.bool()  # [B, T, T]
+
+        for lyr in self.layers:
+            y = lyr["ln1"](x)
+            # MultiheadAttention supports attn_mask [B,T,T] in recent PyTorch
+            y, _ = lyr["attn"](y, y, y, attn_mask=attn_mask, need_weights=False)
+            x = x + y
+            y = lyr["ln2"](x)
+            y = lyr["mlp"](y) if train else lyr["mlp"](y)  # Dropout modules respect .train()
+            x = x + y
+        return x
