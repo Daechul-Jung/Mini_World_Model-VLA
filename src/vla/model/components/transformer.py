@@ -7,8 +7,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.rl.vla.model.components.base import TokenGroup
-from models.rl.vla.utils.typing import Dtype, PRNGkey, Shape, Union
+from src.vla.model.components.base import TokenGroup
+from src.vla.utils.typing import Dtype, PRNGkey, Shape, Union
 
 class AddPositionEmbs(nn.Module):
     """

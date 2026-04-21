@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.rl.vla.model.components.film_conditioning_layer import FilmConditioning
+from src.vla.model.components.film_conditioning_layer import FilmConditioning
 
 T = TypeVar('T')
 

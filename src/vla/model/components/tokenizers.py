@@ -9,9 +9,9 @@ import torch.nn.functional as F
 from scipy.stats import norm
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models.rl.vla.model.components.transformer import MAPHead, AddPositionEmbs
-from models.rl.vla.utils.spec import ModuleSpec
-from models.rl.vla.model.components.base import TokenGroup
+from src.vla.model.components.transformer import MAPHead, AddPositionEmbs
+from src.vla.utils.spec import ModuleSpec
+from src.vla.model.components.base import TokenGroup
 
 
 EPS = 1e-6

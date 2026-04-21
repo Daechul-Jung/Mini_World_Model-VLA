@@ -11,8 +11,8 @@ import numpy as np
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.rl.vla.model.components.base import TokenGroup
-from models.rl.vla.model.components.transformer import Transformer
+from src.vla.model.components.base import TokenGroup
+from src.vla.model.components.transformer import Transformer
 
 class AttentionRule(Enum):
     """
@@ -59,8 +59,8 @@ class TimestepGroup(TokenGroup):
     def __post_init__(self):
         assert (
             len(self.tokens.ndim) == 4
-        ), 'TimestepGroup tokens must be (batch, Time_dim, n_tokens, Token_dim)'
-        assert len(self.mask.ndim) == 3, 'TimestepGroup tokens must be (batch, Time_dim, n_tokens, Token_dim)'
+        ), 'TimestepGroup tokens must be (batch, time_dim, n_tokens, token_dim)'
+        assert len(self.mask.ndim) == 3, 'TimestepGroup tokens must be (batch, time_dim, n_tokens, token_dim)'
 
 def find_match(pattern_dict: Dict[str, Any], name: str, default: Any):
     """
@@ -206,7 +206,10 @@ class BlockTransformer(nn.Module):
         Returns:
             tokens: A tensor of shape (batch, total_tokens, token_embedding_size)
         """
-        if len(prefix_groups)> 0: 
+        if len(prefix_groups) > 0: 
+            ## Concat is looking for dimension to attach each other, so other dimensions should be the same.
+            ## We want to concat on token dimension, so we check whether batch and token_dim are the same for all prefix groups
+            ## So only number of token dimension would be larger after concatenation, tokens' embedding dimension would be same 
             all_prefix_tokens = torch.concatenate([group.tokens for group in prefix_groups], dim = 1) 
             ## This is shape of [batch, total_prefix_tokens, token_dim]
         else:
@@ -216,7 +219,8 @@ class BlockTransformer(nn.Module):
         
         all_timestep_tokens = torch.concatenate([group.tokens for group in timestep_groups], dim = 2)
         batch, time_dim, n_tokens, token_dim = all_timestep_tokens.shape
-        all_timestep_tokens = all_timestep_tokens.reshape(batch, time_dim * n_tokens, token_dim) ## [batch, total_tokens, token_dim] 
+        ## [batch, total_tokens, token_dim] 
+        all_timestep_tokens = all_timestep_tokens.reshape(batch, time_dim * n_tokens, token_dim) 
 
         tokens = torch.concatenate([all_prefix_tokens, all_timestep_tokens], dim = 1) ## [batch, total_prefix + total_timestep, token_dim]
         return tokens
@@ -302,6 +306,7 @@ class BlockTransformer(nn.Module):
             return np.searchsorted(np.cumsum(tokens_per_group), i, side=side)
         
         horizon = timestep_groups[0].tokens.shape[1]
+        ## Calculate total number of tokens for prefix and timestep groups to determine the size of attention mask
         tokens_per_prefix_group = [group.tokens.shape[1] for group in prefix_groups]
         tokens_per_timestep_group = [group.tokens.shape[2] for group in timestep_groups]
 

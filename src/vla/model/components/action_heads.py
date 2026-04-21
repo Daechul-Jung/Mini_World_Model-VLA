@@ -11,12 +11,12 @@ from torch.distributions import Categorical
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.rl.vla.model.components.base import TokenGroup
-from models.rl.vla.model.components.diffusion import cosine_beta_schedule, create_diffusion_model
-from models.rl.vla.model.components.tokenizers import BinTokenizer
-from models.rl.vla.model.components.transformer import MAPHead
-from models.rl.vla.model.components.unet import ConditionalUnet1D, unet_squaredcos_cap_v2
-from models.rl.vla.utils.typing import PRNGkey
+from src.vla.model.components.base import TokenGroup
+from src.vla.model.components.diffusion import cosine_beta_schedule, create_diffusion_model
+from src.vla.model.components.tokenizers import BinTokenizer
+from src.vla.model.components.transformer import MAPHead
+from src.vla.model.components.unet import ConditionalUnet1D, unet_squaredcos_cap_v2
+from src.vla.utils.typing import PRNGkey
 
 def masked_mean(x: torch.Tensor, mask: torch.Tensor):
     mask = torch.broadcast_to(mask, x.shape)

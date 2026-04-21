@@ -5,13 +5,14 @@ from typing import Optional
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.rl.vla.utils.typing import Shape, Sequence
+from src.vla.utils.typing import Shape, Sequence
 
 
 @dataclass(frozen=True)
 class TokenGroup:
     """
     A group of tokens that have semantic meaning together (e.g. the tokens for a single observation)
+    This is used for Prefix group and Timestep group
     
     Attributes:
         tokens: torch.tensor array of shape (..., n_tokens, token_dim)
@@ -24,7 +25,8 @@ class TokenGroup:
     def create(cls, tokens: torch.Tensor, mask: Optional[torch.Tensor] = None, **kwargs):
         ## cls is TokenGroup itself
         if mask is None:
-            mask = torch.ones((tokens.shape[:-1]), device=tokens.device, dtype=tokens.dtype)
+            ## Excluding the last dimension which is token dimensinon, 
+            mask = torch.ones((tokens.shape[:-1]), device=tokens.device, dtype=tokens.dtype) 
         assert mask.ndim == tokens.ndim - 1
 
         return cls(tokens, mask, **kwargs)
