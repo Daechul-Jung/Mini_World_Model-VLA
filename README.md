@@ -146,16 +146,16 @@ Use `torch.autocast("cuda", dtype=torch.bfloat16)` and `batch_size=8–16` on a 
 
 ```bash
 # TUM RGB-D (room sequences, ~150 MB total)
-python scripts/download/download_tum_rgbd.py \
+python3 scripts/download/download_tum_rgbd.py \
     --sequences fr1_desk fr2_desk fr3_office \
     --output_dir data/tum_rgbd
 
 # Bridge dataset subset for VLA (pick & place, ~5 GB)
-python scripts/download/download_openx_subset.py \
+python3 scripts/download/download_openx_subset.py \
     --n_episodes 500 --output_dir data/openx
 
 # LSUN room images for image diffusion (~20K images)
-python scripts/download/download_lsun_rooms.py \
+python3 scripts/download/download_lsun_rooms.py \
     --n_images 20000 --output_dir data/lsun_rooms
 ```
 
@@ -163,16 +163,16 @@ python scripts/download/download_lsun_rooms.py \
 
 ```bash
 # Phase 1: VQ-VAE (tokenize frames)
-python scripts/train/train_world_model.py \
+python3 scripts/train/train_world_model.py \
     --data_dir data/tum_rgbd --phase 1 --epochs 50 --batch_size 16
 
 # Phase 2: Dynamics Transformer (predict next tokens)
-python scripts/train/train_world_model.py \
+python3 scripts/train/train_world_model.py \
     --data_dir data/tum_rgbd --phase 2 --epochs 100 \
     --vqvae_ckpt checkpoints/world_model/vqvae_best.pt
 
 # Phase 3: Diffusion decoder (render imagined frames)
-python scripts/train/train_world_model.py \
+python3 scripts/train/train_world_model.py \
     --data_dir data/tum_rgbd --phase 3 --epochs 100 \
     --vqvae_ckpt checkpoints/world_model/vqvae_best.pt
 ```
@@ -180,7 +180,7 @@ python scripts/train/train_world_model.py \
 ### 3. Train image diffusion (rooms)
 
 ```bash
-python scripts/train/train_diffusion.py \
+python3 scripts/train/train_diffusion.py \
     --data_dir data/lsun_rooms --phase all --epochs 100 --batch_size 32
 ```
 
@@ -221,8 +221,6 @@ imagined = model.imagine(context, n_steps=8, ddim_steps=50)
    from src.world_model.splatting.gaussians import GaussianScene
    scene = GaussianScene.from_colmap_points(xyz, rgb)
    ```
-4. Render with the `gsplat` library: `pip install gsplat`
-
 **TUM RGB-D shortcut:** Already has calibrated depth + ground-truth poses, so skip COLMAP entirely. Download and run directly with `download_tum_rgbd.py`.
 
 ---
@@ -230,7 +228,7 @@ imagined = model.imagine(context, n_steps=8, ddim_steps=50)
 ## Key design decisions
 
 **Why VQ-VAE + Transformer (not end-to-end pixel diffusion)?**
-Discretizing frames into tokens (like VQVAE → codebook) lets the dynamics model be a simple language-model-style GPT, which is much cheaper to train than full pixel-space diffusion. The separate diffusion decoder handles image quality. This is the Genie/IRIS architecture.
+Discretizing frames into tokens lets the dynamics model be a simple language-model-style GPT, which is much cheaper to train than full pixel-space diffusion. The separate diffusion decoder handles image quality. This is the Genie/IRIS architecture.
 
 **Why 3-phase training?**
 Each component has a different objective. Joint end-to-end training is unstable and requires careful loss balancing. Training separately then fine-tuning jointly (optional) gives more reliable results.
