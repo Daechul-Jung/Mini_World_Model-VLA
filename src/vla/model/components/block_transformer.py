@@ -29,7 +29,8 @@ class AttentionRule(Enum):
 @dataclass(frozen = True)
 class PrefixGroup(TokenGroup):
     """
-    A group of tokens that will be at the beginning of the token sequence (e.g. task tokens)
+    A group of tokens that will be at the beginning of the token sequence (e.g. task tokens) which is language instruction
+    It assumes that prefix tokens would be fixed from the beginning to the end, 
 
     Add a name identifying the group, and a dictionary indicating what groups it should attend to
 
@@ -49,7 +50,7 @@ class PrefixGroup(TokenGroup):
 @dataclass(frozen = True)
 class TimestepGroup(TokenGroup):
     """
-    A group of tokens that is repeated for each timestep. (e.g. observation tokens)
+    A group of tokens that is repeated for each timestep. (e.g. observation tokens) tokenized from image at each timestep
 
     See PrefixGroup for details on the name and attention_rules fields.
     """
@@ -65,18 +66,22 @@ class TimestepGroup(TokenGroup):
 def find_match(pattern_dict: Dict[str, Any], name: str, default: Any):
     """
     Find the first pattern in the dictionary, or return the default value 
+    pattern_dict: attention_rules
+    name: the name of the other group from TokenMetadata
     """
 
     for pattern, value in pattern_dict.items():
         if fnmatch(name, pattern):
+            ## this function is used to check whether the name of other group matches the pattern specified in name, 
+            # which is more flexible than exact match.
             return value 
     return default 
 
 @dataclass(frozen = True)
 class TokenMetadata:
     """
-    Attention mask logic supported by AttentionRule. Note that all tokens with the same 
-    group at the same timestep always attend to each other unless you explicitly have 
+    Attention mask logic supported by AttentionRule.
+    Note that all tokens with the same group at the same timestep always attend to each other unless you explicitly have 
     attention_rules[self.name] = AttentionRule.NEVER
     """
 
@@ -142,14 +147,17 @@ class BlockTransformer(nn.Module):
                 ):
         """
         Args:
-            prefix_groups: A list of PrefixGroup objects
+            prefix_groups: A list of PrefixGroup objects (language instruction tokens, which are shared across all timesteps)
                 each group has 
                     - tokens with shape (batch, n_tokens, token_embedding_size)
                     - mask with shape (batch, n_tokens) indicating which tokens are padding 
                     - name identifying the group 
                     - dictionary of attention patterns dictating which other groups it will attend to.
 
-            timestep_groups: A list of TimestepGroup objects
+            timestep_groups: A list of TimestepGroup objects (observation tokens, which are specific to each timestep)
+            interesting things are how time_dim would be defined in here, even though it can be the images at each timestep
+            -> time_dim is window of recent history (how many frames would be used for next prediction)
+            So, not necessarily teh whole trajectories from the beginning
                 each group has 
                     - tokens with shape (batch, time_dim, n_tokens, token_embedding_size)
                     - mask with shape (batch, time_dim, token_embedding_size)
@@ -217,11 +225,12 @@ class BlockTransformer(nn.Module):
             token_dim = prefix_groups[0].tokens.shape[-1]
             all_prefix_tokens = torch.zeros((batch, 0, token_dim), device=prefix_groups[0].tokens.device, dtype=prefix_groups[0].tokens.dtype)
         
+        ## concatenate all timestep tokens together along the number of tokens dimension
         all_timestep_tokens = torch.concatenate([group.tokens for group in timestep_groups], dim = 2)
         batch, time_dim, n_tokens, token_dim = all_timestep_tokens.shape
         ## [batch, total_tokens, token_dim] 
         all_timestep_tokens = all_timestep_tokens.reshape(batch, time_dim * n_tokens, token_dim) 
-
+        ## Assembling all token groups along the second dimension (number of tokens * horizon for timestep + number of tokens for prefix)
         tokens = torch.concatenate([all_prefix_tokens, all_timestep_tokens], dim = 1) ## [batch, total_prefix + total_timestep, token_dim]
         return tokens
     

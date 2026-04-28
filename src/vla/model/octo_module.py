@@ -95,8 +95,8 @@ class OctoTransformer(nn.Module):
             use_correct_attention: bool = False
     ):
         super().__init__()
-        self.observation_tokenizers = nn.ModuleDict(observation_tokenizers)
-        self.task_tokenizers = nn.ModuleDict(task_tokenizers)
+        self.observation_tokenizers = nn.ModuleDict(observation_tokenizers)  ## ImageTokenizer which returns TokenGroup from forward
+        self.task_tokenizers = nn.ModuleDict(task_tokenizers) ## LanguageTokenizer which returns TokenGroup from forward
         self.readout_cfg = readouts
         self.token_embedding_size = token_embedding_size
         self.max_horizon = max_horizon
@@ -235,4 +235,174 @@ class OctoTransformer(nn.Module):
 
             readout_tokens = readout_tokens + self._pos_embed_timestep(group_name, readout_tokens)
             readout_mask = torch.ones((B, horizon, num_tokens), device = timestep_pad_mask.device, dtype = torch.bool)
+            readout_rules = {
+                "task_*": AttentionRule.CAUSAL,
+                "obs_*": AttentionRule.CAUSAL,
+                group_name: AttentionRule.CAUSAL
+            }
             
+            all_timestep_groups.append(
+                TimestepGroup(
+                    tokens = readout_mask,
+                    mask = readout_mask,
+                    name = group_name,
+                    attention_rules= readout_rules
+                )
+            )
+            
+        ### Run block transformer
+        prefix_out, timestep_out = self.block(
+            prefix_groups =all_prefix_groups,
+            timestep_groups = all_timestep_groups,
+            train = train,
+            verbose = verbose
+        )
+        
+        ## Collect outputs as TokenGroups
+        outputs: Dict[str, TokenGroup] = {}
+        for group in prefix_out:
+            outputs[group.name] = TokenGroup(tokens=group.tokens, mask = group.mask)
+        
+        for group in timestep_out:
+            outputs[group.name] = TokenGroup(tokens=group.tokens, mask = group.mask)
+            
+        if len(prefix_out) > 0:
+            outputs['task'] = _concat_tokengroups(
+                [TokenGroup(group.tokens, group.mask) for group in timestep_out if group.name.startswith('obs_')],
+                axis=-2
+            )
+        
+        return outputs
+    
+    def _get_or_make_proj(self, group_name: str) -> nn.Module:
+        if group_name not in self.proj_head:
+            """
+            Make or get projection head for a given group name. 
+            There are two cases:
+                - Prefix which has incoming rank 3 (B, num_tokens, C_in)
+                - Timestep which has incoming rank 4 (B, timestep, num_tokens, C_in)
+            Here I will use a simple linear projection on the last dimension which works for both rank
+            """
+            
+            self.proj_head[group_name] = nn.Linear(0 , 0, bias=True) ## Lazy Build
+            def _lazy_forward(x, head = self.proj_head[group_name]):
+                if isinstance(head, nn.Linear) and head.in_features == 0:
+                    in_dim = x.shape[-1]
+                    new = nn.Linear(in_dim, self.token_embedding_size, bias = True)
+                    new.init.xavier_uniform_(new.weight), new.init.xavier_uniform_(new.bias)
+                    self.proj_head[group_name] = new
+                    return new(x)
+                return head(x)
+            
+            class _Lazy(nn.Module):
+                def __init__(self, fn): 
+                    super().__init__()
+                    self.fn = fn
+                    
+                def forward(self, x):
+                    return self.fn(x)
+                
+            self.proj_head[group_name] = _Lazy(_lazy_forward)
+        return self.proj_head[group_name]
+    
+    def _pos_embed_prefix(self, name: str, tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Set positional embedding parameters as type of Dictionary 
+        """
+        ## tokens: [B, num_tokens, D]
+        B, N, D = tokens.shape
+        if name not in self.pos_embed_prefix:
+            pos_emb = nn.Parameter(torch.randn(1, N, D) * 0.02)
+            self.register_parameter(f"{name}_pos_embedding_prefix", pos_emb)
+            self.pos_embed_prefix[name] = pos_emb
+        pos_emb = self.pos_embed_prefix[name]
+        
+        if pos_emb.shape[1] != N or pos_emb.shape[2] != D:
+            new = nn.Parameter(torch.randn(1, N, D, device=pos_emb.device, dtype = pos_emb.dtype) * 0.02)
+            setattr(self, f'{name}_pos_embedding_prefix', new)
+            self.pos_embed_prefix[name] = new
+            pos_emb = new
+            
+        return pos_emb.expand(B, N, D)            
+    
+    def _pos_embed_timestep(self, name: str, tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Set positional embedding parameters as type of Dictionary 
+        """
+        ## tokens: [B, T, num_tokens, D]
+        B, T, N, D = tokens.shape
+        if name not in self.pos_embed_timestep:
+            pos_emb = nn.Parameter(torch.randn(1, T, 1, D) * 0.02)
+            self.register_parameter(f"{name}_pos_embedding_timestep", pos_emb)
+            self.pos_embed_timestep[name] = pos_emb
+        pos_emb = self.pos_embed_timestep[name]
+        
+        if pos_emb.shape[1] != T or pos_emb.shape[3] != D:
+            new = nn.Parameter(torch.randn(1, T, 1, D, device=pos_emb.device, dtype = pos_emb.dtype) * 0.02)
+            setattr(self, f'{name}_pos_embedding_timestep', new)
+            self.pos_embed_timestep[name] = new
+            pos_emb = new
+        pos_emb_slice = pos_emb[:, :T, :, :] ## Truncate current horizon
+        
+        return pos_emb_slice.expand(B, T, N, D)
+    
+class OctoModule(nn.Module):
+    """
+    Bundles OctoTransformer with heads 
+    """
+    
+    def __init__(self, octo_transformer: OctoTransformer, heads: Dict[str, nn.Module]):
+        super().__init__()
+        self.octo_transformer = octo_transformer
+        self.heads = nn.ModuleDict(heads)
+        
+    def forward(self, observations, tasks, timestep_pad_mask, train: bool = True, verbose = False):
+        """
+        Run Transformer and the main method for all heads. Useful for init
+        
+        Args:
+            observations: A dictionary containing observation data
+                where each element has shape (batch, horiozn, *)
+            tasks: A dictionary containing task data
+                where each element has shape (batch, *)
+            timestep_pad_mask: A boolean mask of shape (batch, horizon) where False indicates a padded timestep
+            train: Run in training mode
+            verbose: If True, prints out the structure of the OctoTransformer (Useful)
+                
+        Returns:
+            transformer_output
+            head_output: dictionary of output from heads {head_name: head_output}
+        """
+        transformer_output = self.octo_transformer( ## returns Concatenated outputs of TokenGroups from prefix and timestep group
+            observations, tasks, timestep_pad_mask, train= train, verbose = verbose
+        )
+        
+        head_outputs = {name: head(transformer_output, train = train) for name, head in self.heads.items()}
+        
+        return transformer_output, head_outputs
+    
+    @classmethod
+    def create(
+        cls,
+        observation_tokenizers: Dict[str, nn.Module],   
+        task_tokenizers: Dict[str, nn.Module],         
+        heads: Dict[str, nn.Module],                  
+        readouts: Dict[str, int],
+        transformer_kwargs: Dict,
+        token_embedding_size: int,
+        max_horizon: int,
+        repeat_task_tokens: bool = False,
+        use_correct_attention: bool = False,
+    ) -> "OctoModule":
+        
+        model_def = OctoTransformer(
+            observation_tokenizers=observation_tokenizers,
+            task_tokenizers=task_tokenizers,
+            readouts=readouts,
+            token_embedding_size=token_embedding_size,
+            max_horizon=max_horizon,
+            repeat_task_tokens=repeat_task_tokens,
+            transformer_kwargs=transformer_kwargs,
+            use_correct_attention=use_correct_attention,
+        )
+        return cls(octo_transformer=model_def, heads=heads)

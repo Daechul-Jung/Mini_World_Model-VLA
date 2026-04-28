@@ -13,6 +13,8 @@ class TokenGroup:
     """
     A group of tokens that have semantic meaning together (e.g. the tokens for a single observation)
     This is used for Prefix group and Timestep group
+    Prefix group: tokens that are shared across all timesteps(fixed this time but later can be replaced by chain of thoughts)
+    Timestep group: tokens that are specific based on the observations from image at each timestep 
     
     Attributes:
         tokens: torch.tensor array of shape (..., n_tokens, token_dim)

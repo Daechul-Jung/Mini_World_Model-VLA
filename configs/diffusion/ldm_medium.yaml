@@ -1,0 +1,46 @@
+# LDM config — medium size (~200M params) for room image generation
+# Target: LSUN bedroom / living_room, 256×256 px
+
+image_size: 256
+context_dim: 512             # set to CLIP embedding dim for text-conditional
+
+vae:
+  in_channels: 3
+  base_channels: 128
+  channel_mults: [1, 2, 4, 4]   # 4 downsamples → 16×16 or 3 → 32×32
+  z_channels: 4
+  n_res_blocks: 2
+  kl_weight: 1.0e-6
+  latent_scale: 0.18215          # applied to VAE latents before UNet
+
+unet:
+  in_channels: 4                 # must match vae.z_channels
+  out_channels: 4
+  base_channels: 256
+  channel_mults: [1, 2, 4, 4]
+  attn_at_levels: [false, true, true, true]
+  context_dim: 512
+  n_res_blocks: 2
+  dropout: 0.1
+
+scheduler:
+  num_train_timesteps: 1000
+  beta_schedule: cosine
+
+# Training
+training:
+  phase1_epochs: 50              # VAE
+  phase2_epochs: 200             # LDM UNet
+  batch_size: 32
+  lr: 1e-4
+  weight_decay: 1e-4
+  clip_grad_norm: 1.0
+  num_workers: 4
+  sample_every_n_epochs: 10
+  precision: bf16
+
+# Inference
+inference:
+  ddim_steps: 50
+  guidance_scale: 1.0            # 1.0 = unconditional; 7.5 = strong text guidance
+  eta: 0.0                       # 0 = deterministic DDIM

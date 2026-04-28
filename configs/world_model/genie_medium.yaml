@@ -1,0 +1,56 @@
+# World Model config — medium size (~275M params, fits 16GB VRAM with bf16)
+# Target: room-scale video generation, 256×256 px frames
+
+image_size: 256
+max_frames: 16
+action_dim: 0          # set to robot action dim if using action conditioning
+
+vqvae:
+  in_channels: 3
+  base_channels: 128
+  channel_mults: [1, 2, 4]     # 3 downsamples → 32×32 spatial tokens
+  num_embeddings: 1024          # codebook vocabulary size
+  latent_dim: 256               # token embedding dimension
+  n_res_blocks: 2
+  beta: 0.25                    # VQ commitment loss weight
+
+dynamics:
+  vocab_size: 1024
+  tokens_per_frame: 1024        # 32*32 for 256px images
+  action_dim: 0
+  n_layers: 12
+  dim: 512
+  num_heads: 8
+  max_frames: 16
+  dropout: 0.1
+
+decoder:                        # Diffusion UNet
+  in_channels: 3
+  out_channels: 3
+  base_channels: 128
+  channel_mults: [1, 2, 4, 8]
+  attn_at_levels: [false, false, true, true]
+  context_dim: 256              # must match vqvae.latent_dim
+  n_res_blocks: 2
+  dropout: 0.1
+
+scheduler:
+  num_train_timesteps: 1000
+  beta_schedule: cosine
+
+# Training hyperparameters
+training:
+  phase1_epochs: 50             # VQ-VAE
+  phase2_epochs: 100            # Dynamics
+  phase3_epochs: 100            # Diffusion decoder
+  batch_size: 16
+  lr: 1e-4
+  weight_decay: 1e-4
+  clip_grad_norm: 1.0
+  num_workers: 4
+  precision: bf16               # use torch.autocast
+
+# Data
+data:
+  clip_len: 8                   # video clip length for dynamics training
+  stride: 4                     # sliding window stride
