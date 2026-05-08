@@ -16,13 +16,12 @@ Dataset page: https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download
 Usage:
     # Download recommended sequences for room generation
     python scripts/download/download_tum_rgbd.py \
-        --sequences fr1_desk fr2_desk fr3_office \
+        --sequences fr1_desk fr2_desk \
         --output_dir data/tum_rgbd
 
 Recommended sequences for room/office reconstruction:
   fr1_desk      — office desk, ~30s, 9.1 MB
   fr2_desk      — larger desk scene, ~120s, 56 MB
-  fr3_office    — office room overview, ~60s, 88 MB
   fr1_room      — full room pan, ~30s, 14 MB
   fr2_large_no_loop — large indoor space, ~340s, 340 MB
 """
@@ -37,7 +36,6 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 # Official TUM RGB-D sequence URLs
-# Format: sequence_name → (url, description)
 SEQUENCES: Dict[str, tuple] = {
     # freiburg1 (close range, ~0.5m focal length)
     "fr1_desk":       ("https://cvg.cit.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz",
@@ -73,7 +71,7 @@ INTRINSICS = {
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--sequences", nargs="+",
-                   default=["fr1_desk", "fr2_desk", "fr3_office"],
+                   default=["fr1_desk", "fr2_desk"],
                    choices=list(SEQUENCES.keys()))
     p.add_argument("--output_dir", default="data/tum_rgbd")
     p.add_argument("--extract_frames", action="store_true", default=True,
@@ -191,23 +189,35 @@ def export_frames(seq_dir: Path, image_size: Optional[int]) -> None:
         return
 
     rgb_out = seq_dir / "rgb_frames"
+    depth_out = seq_dir / "depth_frames"
     rgb_out.mkdir(exist_ok=True)
-    poses_lines = ["# timestamp tx ty tz qx qy qz qw"]
+    depth_out.mkdir(exist_ok=True)
+    poses_lines = ["# frame_index timestamp tx ty tz qx qy qz qw"]
 
     for i, frame in enumerate(frames):
-        rgb = Image.open(frame["rgb"]).convert("RGB")
-        if image_size:
-            rgb = rgb.resize((image_size, image_size), Image.LANCZOS)
-        rgb.save(rgb_out / f"{i:05d}.png")
+        rgb_path = rgb_out / f"{i:05d}.png"
+        depth_path = depth_out / f"{i:05d}.png"
+        if not rgb_path.exists() or not depth_path.exists():
+            rgb = Image.open(frame["rgb"]).convert("RGB")
+            depth = Image.open(frame["depth"])
+            if image_size:
+                rgb = rgb.resize((image_size, image_size), Image.LANCZOS)
+                depth = depth.resize((image_size, image_size), Image.NEAREST)
+            rgb.save(rgb_path)
+            depth.save(depth_path)
 
         if frame["pose"] is not None:
-            poses_lines.append(f"{frame['timestamp']:.6f} " + " ".join(f"{v:.8f}" for v in frame["pose"]))
+            poses_lines.append(
+                f"{i} {frame['timestamp']:.6f} "
+                + " ".join(f"{v:.8f}" for v in frame["pose"])
+            )
 
         if i % 200 == 0:
             print(f"  Exported {i+1}/{len(frames)} frames")
 
     (seq_dir / "poses.txt").write_text("\n".join(poses_lines))
     print(f"  Saved {len(frames)} RGB frames to {rgb_out}")
+    print(f"  Saved {len(frames)} depth frames to {depth_out}")
     print(f"  Saved poses.txt ({len(poses_lines)-1} poses)")
 
 

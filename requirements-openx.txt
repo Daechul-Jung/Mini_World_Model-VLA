@@ -1,0 +1,12 @@
+# Isolated downloader environment for TFDS/RLDS Open X-Embodiment subsets.
+#
+# Keep NumPy below 2 for apache-beam/pyarrow wheels used by TFDS robotics
+# imports. This avoids "_ARRAY_API not found" crashes from pyarrow.
+numpy<2
+pyarrow>=14,<16
+apache-beam>=2.54,<2.57
+tensorflow>=2.15,<2.16
+tensorflow-datasets>=4.9.4,<4.10
+rlds>=0.1.8
+pillow>=10
+tqdm>=4

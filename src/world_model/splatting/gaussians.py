@@ -24,7 +24,7 @@ so skip COLMAP and use the provided poses directly.
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 
 def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -137,6 +137,63 @@ class GaussianScene(nn.Module):
 
         return (color + 0.5).clamp(0, 1)
 
+    def render(
+        self,
+        viewmats: torch.Tensor,
+        intrinsics: torch.Tensor,
+        width: int,
+        height: int,
+        background: Optional[torch.Tensor] = None,
+        sh_degree: Optional[int] = None,
+        render_mode: str = "RGB",
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+        """
+        Render this scene with gsplat.
+
+        Args:
+            viewmats:   (C, 4, 4) world-to-camera matrices.
+            intrinsics: (C, 3, 3) camera intrinsic matrices.
+            width:      output width in pixels.
+            height:     output height in pixels.
+            background: optional (C, 3) RGB background in [0, 1].
+            sh_degree:  None uses constant RGB; int uses SH coefficients.
+        Returns:
+            colors:     (C, H, W, 3) or with depth channel if render_mode asks for it.
+            alphas:     (C, H, W, 1)
+            info:       gsplat metadata dictionary.
+        """
+        try:
+            import gsplat
+        except ImportError as exc:
+            raise ImportError("Install gsplat to render GaussianScene: pip install gsplat") from exc
+
+        if sh_degree is None:
+            colors = self.get_colors()
+        else:
+            colors = torch.cat(
+                [self.sh_dc.permute(0, 2, 1), self.sh_rest.permute(0, 2, 1)],
+                dim=1,
+            )
+
+        if background is None:
+            background = torch.zeros(viewmats.shape[0], 3, device=self.means.device)
+
+        return gsplat.rasterization(
+            means=self.means,
+            quats=self.get_rotation,
+            scales=self.get_scales,
+            opacities=self.get_opacities,
+            colors=colors,
+            viewmats=viewmats,
+            Ks=intrinsics,
+            width=width,
+            height=height,
+            backgrounds=background,
+            sh_degree=sh_degree,
+            render_mode=render_mode,
+            packed=True,
+        )
+
     @classmethod
     def from_colmap_points(
         cls,
@@ -160,7 +217,6 @@ class GaussianScene(nn.Module):
             scene.sh_dc.data[:, :, 0] = (rgb_norm - 0.5) / cls.SH_C0
 
         # Initialize scales from nearest-neighbor distances
-        from torch.nn.functional import pdist
         if means.shape[0] > 1:
             dists = torch.cdist(means[:1000], means[:1000])
             dists.fill_diagonal_(float('inf'))
@@ -199,9 +255,49 @@ class GaussianScene(nn.Module):
         n_removed = prune_mask.sum().item()
         return -n_removed
 
-    def forward(self):
-        raise NotImplementedError(
-            "Use gsplat.rasterization() for differentiable rendering. "
-            "Pass self.means, self.get_covariance, self.get_opacities, self.get_colors() "
-            "along with camera intrinsics/extrinsics."
-        )
+    def forward(
+        self,
+        viewmats: torch.Tensor,
+        intrinsics: torch.Tensor,
+        width: int,
+        height: int,
+    ) -> torch.Tensor:
+        colors, _, _ = self.render(viewmats, intrinsics, width, height)
+        return colors
+
+
+def tum_pose_to_c2w(pose: torch.Tensor) -> torch.Tensor:
+    """
+    Convert TUM pose rows (tx, ty, tz, qx, qy, qz, qw) to camera-to-world matrices.
+    """
+    t = pose[..., :3]
+    q_xyzw = pose[..., 3:7]
+    q_wxyz = torch.cat([q_xyzw[..., 3:4], q_xyzw[..., :3]], dim=-1)
+    R = quaternion_to_rotation(q_wxyz.reshape(-1, 4)).reshape(*pose.shape[:-1], 3, 3)
+    c2w = torch.eye(4, device=pose.device, dtype=pose.dtype).expand(*pose.shape[:-1], 4, 4).clone()
+    c2w[..., :3, :3] = R
+    c2w[..., :3, 3] = t
+    return c2w
+
+
+def c2w_to_viewmat(c2w: torch.Tensor) -> torch.Tensor:
+    """Convert camera-to-world matrices to gsplat world-to-camera view matrices."""
+    return torch.linalg.inv(c2w)
+
+
+def make_intrinsics(
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    batch: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    K = torch.zeros(batch, 3, 3, device=device, dtype=dtype)
+    K[:, 0, 0] = fx
+    K[:, 1, 1] = fy
+    K[:, 0, 2] = cx
+    K[:, 1, 2] = cy
+    K[:, 2, 2] = 1.0
+    return K

@@ -1,0 +1,15 @@
+torch>=2.3
+torchvision>=0.18
+numpy>=1.26
+pillow>=10
+pyyaml>=6
+tqdm>=4
+matplotlib>=3.8
+opencv-python>=4.9
+
+# Optional but useful for 3D Gaussian Splatting. Install only if your CUDA/PyTorch
+# versions are compatible with the wheel available for your machine.
+gsplat>=1.5
+
+# OpenX/TFDS downloads should use requirements-openx.txt in a separate venv
+# because apache-beam/pyarrow can be sensitive to NumPy 2.x.

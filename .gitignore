@@ -1,0 +1,23 @@
+# Local datasets and model outputs
+/data/
+/checkpoints/
+/outputs/
+/runs/
+/wandb/
+
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+/venv/
+/.venv/
+/env/
+/venv_openx_download/
+
+# Local Codex/session artifacts
+/.codex
