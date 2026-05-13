@@ -94,6 +94,27 @@ def _first_available(mapping: dict, *keys):
     return None
 
 
+def _extract_instruction(step: dict) -> str:
+    """Read language instruction from common RLDS step or observation locations."""
+    value = _first_available(
+        step,
+        "natural_language_instruction",
+        "language_instruction",
+        "task_language_instruction",
+    )
+    if value is not None:
+        return _decode_text(value)
+
+    obs = step.get("observation", {})
+    value = _first_available(
+        obs,
+        "natural_language_instruction",
+        "language_instruction",
+        "task_language_instruction",
+    )
+    return _decode_text(value)
+
+
 def _check_openx_environment() -> None:
     """
     Catch the common NumPy 2.x / old pyarrow crash before TFDS reaches Beam.
@@ -204,16 +225,9 @@ def download_bridge(
         if not steps:
             continue
 
-        # Get language instruction from first step
-        first_obs = steps[0]["observation"]
-        instruction = _decode_text(
-            _first_available(
-                first_obs,
-                "natural_language_instruction",
-                "language_instruction",
-                "task_language_instruction",
-            )
-        )
+        # Get language instruction from first step. Different RLDS datasets put
+        # this at either the step level or inside observation.
+        instruction = _extract_instruction(steps[0])
 
         if filter_pick_place and not _is_pick_place(instruction):
             continue
