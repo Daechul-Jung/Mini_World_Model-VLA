@@ -108,3 +108,18 @@ class OctoModel:
             tasks['pad_mask_dict']['language_intsruction'] = torch.zeros(
                 batch_size, dtype = torch.bool, device = self.device
             ) 
+
+        _verify_shapes(tasks, 'tasks', self.example_batch['task'], starting_dim = 1)
+
+        return tasks 
+
+
+    @torch.no_grad()
+    def run_transformer(
+        self,
+        observation: Dict[str, torch.Tensor],
+        tasks: Dict[str, Any],
+        timestep_pad_mask: torch.Tensor,
+        train: bool = False
+    ):
+        "Checks shapes then run OctoTransformer (module.octo_transformer)."
