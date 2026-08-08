@@ -1,3 +1,5 @@
-from .transformer import DynamicsTransformer
+"""Auto-registers every implementation in this package."""
 
-__all__ = ["DynamicsTransformer"]
+from common.registry import autodiscover
+
+autodiscover(__name__)

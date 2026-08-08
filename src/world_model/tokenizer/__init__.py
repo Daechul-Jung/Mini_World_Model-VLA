@@ -1,4 +1,7 @@
-from .quantizer import VectorQuantizer
-from .vqvae import VQVAE
+"""Stage A: video tokenizers."""
 
-__all__ = ["VectorQuantizer", "VQVAE"]
+from common.registry import autodiscover
+
+from . import quantizers  # noqa: F401  -- must register before tokenizers build
+
+autodiscover(__name__, skip=("quantizers",))

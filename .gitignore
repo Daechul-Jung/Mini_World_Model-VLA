@@ -1,23 +1,53 @@
-# Local datasets and model outputs
+# ---------------------------------------------------------------------------
+# Private research notes -- deliberately NOT published.
+#
+# These are the working documents: goals, architecture decisions, unfinished
+# ideas, and measured results including the negative ones. They are written to be
+# read by me and by Claude, not by a GitHub visitor. The public face of this repo
+# is the top-level README.md and the code.
+# ---------------------------------------------------------------------------
+# src/*/docs/
+# src/*/research/
+# CLAUDE.md
+/.agents/
+/.codex
+
+# ---------------------------------------------------------------------------
+# Data and training artifacts
+# ---------------------------------------------------------------------------
 /data/
 /checkpoints/
 /outputs/
 /runs/
 /wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
 
-# Python/cache artifacts
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *.so
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ipynb_checkpoints/
 
-# Local environments
+# ---------------------------------------------------------------------------
+# Environments
+# ---------------------------------------------------------------------------
 /venv/
 /.venv/
 /env/
 /venv_openx_download/
 
-# Local Codex/session artifacts
-/.codex
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.DS_Store
+.vscode/
+.idea/

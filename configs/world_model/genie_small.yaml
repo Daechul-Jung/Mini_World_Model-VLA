@@ -1,0 +1,105 @@
+# Genie-style world model, small. Sized for a 8 GB RTX 4070 Laptop at 128 px.
+#
+# Architecture follows the PUBLISHED Genie recipe (Bruce et al., 2024,
+# arXiv:2402.15391): ST/conv VQ-VAE tokenizer -> latent action model ->
+# action-conditioned dynamics. Genie 3 has no public architecture paper, so its
+# blog-post capabilities (720p, 24 fps, minute-long memory) are targets, not a
+# spec. See src/world_model/docs/ADR.md, ADR-001.
+#
+# 128 px, not 256: at 256 px with 3 downsample stages a frame is 32x32 = 1024
+# tokens, and 8 frames is an 8192-token sequence -- out of budget for the causal
+# GPT baseline. 128 px gives 16x16 = 256 tokens/frame, which fits comfortably.
+
+name: genie_small
+image_size: &image_size 128
+latent_dim: &latent_dim 128
+codebook_size: &codebook 1024
+latent_grid: &grid [16, 16]      # image_size / 2^len(channel_mults)
+
+tokenizer:
+  name: conv_vqvae
+  image_size: *image_size
+  base_channels: 64
+  channel_mults: [1, 2, 4]       # 3 stages -> 8x downsample -> 16x16 tokens
+  latent_dim: *latent_dim
+  n_res_blocks: 2
+  codebook_size: *codebook
+  quantizer:
+    # Plain `vq` COLLAPSES on this data: it initialises the codebook to
+    # uniform(-1/K, 1/K) = +/-0.001, so all 1024 codes start stacked on the
+    # origin, only a handful are ever selected, and unselected codes get no
+    # gradient -- measured 0.78% usage and falling after 3 epochs on LSUN.
+    # `vq_ema` fixes it with data-dependent init + EMA updates + dead-code
+    # restart. `fsq` has no codebook to collapse. `vq` is still selectable as
+    # the baseline.
+    name: vq_ema
+    beta: 0.25
+    decay: 0.99
+    restart_every: 50
+
+latent_action:
+  name: vq_lam
+  image_size: *image_size
+  patch_size: 16                 # Genie's LAM patch size
+  num_actions: 8                 # |A| = 8, as in the paper
+  dim: 256
+  depth: 4
+  num_heads: 4
+  action_dim: 128
+  freeze: true                   # false => Genie-style LAM/dynamics co-training in stage C
+  quantizer:
+    # Must NOT be plain `vq`. With only 8 codes there is no margin: once a code
+    # stops being selected it never gets a gradient again, and a measured run
+    # collapsed from 4.3 to 2.0 live codes while rec_loss kept improving --
+    # the decoder had learned to predict the next frame from the past alone.
+    name: vq_ema
+    beta: 0.25
+    decay: 0.99
+    restart_every: 20            # tighter than the tokenizer's 50: only 8 codes
+
+dynamics:
+  name: causal_gpt
+  latent_grid: *grid
+  vocab_size: *codebook
+  latent_dim: *latent_dim
+  action_kind: latent            # latent | robot | none
+  num_actions: 8
+  n_layers: 8
+  dim: 512
+  num_heads: 8
+  max_frames: 8
+  dropout: 0.1
+  top_k: 256
+
+decoder:
+  name: diffusion_unet
+  base_channels: 64
+  channel_mults: [1, 2, 4]
+  attn_at_levels: [false, true, true]
+  context_dim: *latent_dim
+  n_res_blocks: 2
+  num_train_timesteps: 1000
+  beta_schedule: cosine
+
+data:
+  name: video_folder
+  roots: [data/tum_rgbd]
+  image_size: *image_size
+  clip_len: 8
+  stride: 4
+  frame_skip: 3                  # TUM is ~30 fps; skip 3 -> ~10 fps, matching Genie
+  num_workers: 4
+  val_fraction: 0.05
+
+epochs: 50
+batch_size: 8
+grad_accum: 2
+precision: bf16
+clip_grad_norm: 1.0
+keep_last_checkpoints: 3
+
+optim:
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+  warmup_steps: 500
+  schedule: cosine

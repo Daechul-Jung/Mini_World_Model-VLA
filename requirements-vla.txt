@@ -1,0 +1,17 @@
+# Optional: pretrained VLA backbones (OpenVLA, pi0).
+#
+# Install into your main environment ONLY when you are ready to download weights.
+# OpenVLA-7B is ~15 GB and pi0 is ~7 GB; set HF_HOME to a disk with room first.
+#
+#   export HF_HOME=/path/with/space
+#   python3 -m pip install -r requirements-vla.txt
+#
+# On a 7.7 GiB card, both are usable only as frozen 4-bit feature extractors --
+# see src/vla/docs/ADR.md, ADR-004. bitsandbytes is therefore not optional.
+
+transformers>=4.40
+accelerate>=0.30
+bitsandbytes>=0.43        # 4-bit quantisation; required, not optional, at this VRAM
+peft>=0.11                # LoRA. Documented as out of reach here; kept for a bigger GPU.
+sentencepiece>=0.2
+timm>=0.9

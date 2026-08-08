@@ -1,0 +1,32 @@
+# Action-conditioned world model on OpenX robot episodes.
+#
+# The important difference from genie_small.yaml: action_kind=robot. The dynamics
+# model is conditioned on REAL 4-DoF robot actions instead of unsupervised latent
+# codes, so no translation layer is needed to drive it from a VLA. This is the
+# right configuration for the "world model as a VLA environment" goal; latent
+# actions are for unlabelled room video.
+#
+# Stage B is not needed at all with this config.
+
+_base_: world_model/genie_small.yaml
+name: genie_small_openx
+
+dynamics:
+  action_kind: robot
+  robot_action_dim: 4           # UCSD pick-place. Bridge is 7 -- check your data.
+  action_embed_dim: 128
+
+data:
+  _replace_: true
+  name: episode_npz
+  root: data/openx
+  image_size: 128
+  clip_len: 8
+  stride: 2
+  frame_skip: 1
+  instruction_filter: null      # e.g. "pick" to restrict to pick-and-place
+  num_workers: 4
+  val_fraction: 0.1
+
+batch_size: 8
+epochs: 60

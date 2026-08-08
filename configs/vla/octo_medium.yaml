@@ -1,0 +1,26 @@
+# ~90M params at 256 px. Between Octo-Small (27M) and Octo-Base (93M).
+#
+# Only move here once octo_small is clearly learning. Fits 8 GB at batch 8 with
+# bf16 and gradient accumulation; if it OOMs, lower batch_size and raise
+# grad_accum rather than shrinking the model -- the effective batch is what
+# matters.
+
+_base_: vla/octo_small.yaml
+name: octo_medium_openx
+
+policy:
+  name: octo_medium
+  image_size: 256
+  dim: 768
+  depth: 12
+  num_heads: 12
+
+data:
+  image_size: 256
+
+batch_size: 8
+grad_accum: 4                   # effective batch 32
+epochs: 80
+
+optim:
+  lr: 1.5e-4

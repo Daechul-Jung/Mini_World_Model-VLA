@@ -1,300 +1,137 @@
+"""Train one world-model stage.
+
+Components are trained one at a time and each writes its own checkpoint, so a
+later stage loads an earlier one frozen. That is the whole point of the layout:
+you can replace the tokenizer without retraining the dynamics model's *code*, and
+you can inspect each component in isolation when something is wrong.
+
+    # A -- tokenizer (LSUN stills + TUM frames both work here)
+    python scripts/train/train_world_model.py --stage a --config genie_small.yaml
+
+    # B -- latent action model (needs VIDEO; LSUN stills cannot train this)
+    python scripts/train/train_world_model.py --stage b --config genie_small.yaml
+
+    # C -- dynamics, on frozen tokens from A and actions from B
+    python scripts/train/train_world_model.py --stage c --config genie_small.yaml \
+        --tokenizer_ckpt stage_a_tokenizer:best \
+        --latent_action_ckpt stage_b_latent_action:best
+
+    # D -- diffusion decoder (optional; do this last, or never)
+    python scripts/train/train_world_model.py --stage d --config genie_small.yaml \
+        --tokenizer_ckpt stage_a_tokenizer:best
+
+`stage_a_tokenizer:best` resolves to the newest run's `best.pt`, so day-to-day
+commands stay free of timestamps. Override any config value inline:
+
+    --set optim.lr=3e-4 --set data.clip_len=16 --set tokenizer.codebook_size=2048
 """
-Training script for GenieWorldModel.
 
-Three-phase training (recommended):
-  Phase 1: Train VQ-VAE alone for good frame tokenization.
-  Phase 2: Freeze VQ-VAE, train DynamicsTransformer on discrete tokens.
-  Phase 3: Freeze VQ-VAE + Dynamics, train diffusion decoder for sharp rendering.
-
-Each phase can be run independently by setting --phase 1/2/3.
-
-Usage:
-    # Phase 1: VQ-VAE
-    python scripts/train/train_world_model.py \
-        --data_dir data/tum_rgbd/fr1_desk/rgb_frames \
-        --phase 1 --epochs 50 --batch_size 16
-
-    # Phase 2: Dynamics (requires Phase 1 checkpoint)
-    python scripts/train/train_world_model.py \
-        --data_dir data/tum_rgbd \
-        --phase 2 --epochs 100 \
-        --vqvae_ckpt checkpoints/vqvae_best.pt
-
-    # Phase 3: Diffusion decoder
-    python scripts/train/train_world_model.py \
-        --data_dir data/tum_rgbd \
-        --phase 3 --epochs 100 \
-        --vqvae_ckpt checkpoints/vqvae_best.pt
-
-    # All phases sequentially
-    python scripts/train/train_world_model.py \
-        --data_dir data/tum_rgbd --phase all
-"""
+from __future__ import annotations
 
 import argparse
-import logging
-import os
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+
 import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-from PIL import Image
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+from common.checkpoint import resolve_ckpt
+from common.config import apply_overrides, config_hash, load_config
+from common.logging import setup_logging
+from common.seeding import describe_device, get_device, seed_everything
+from common.stages import STAGES, StageContext
+from common.trainer import train_stage
 
+import world_model  # noqa: F401  -- registers components
+import world_model.training  # noqa: F401  -- registers stages
 
-# ---------------------------------------------------------------------------
-# Datasets
-# ---------------------------------------------------------------------------
-
-class ImageFolderDataset(Dataset):
-    """Single-frame dataset for VQ-VAE and diffusion decoder training."""
-
-    def __init__(self, root: str, image_size: int = 256):
-        self.paths = sorted(
-            p for p in Path(root).rglob("*.png")
-            if not p.name.startswith("depth")
-        ) + sorted(Path(root).rglob("*.jpg"))
-        self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),  # → [-1, 1]
-        ])
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, idx):
-        img = Image.open(self.paths[idx]).convert("RGB")
-        return self.transform(img)
+STAGE_ALIASES = {
+    "a": "stage_a_tokenizer",
+    "b": "stage_b_latent_action",
+    "c": "stage_c_dynamics",
+    "d": "stage_d_decoder",
+}
 
 
-class VideoClipDataset(Dataset):
-    """
-    Video clip dataset for dynamics model training.
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--stage", required=True, help="a|b|c|d or a full stage name")
+    parser.add_argument("--config", required=True, help="path under configs/ or absolute")
+    parser.add_argument("--run_name", default=None, help="checkpoint subdirectory; defaults to a config hash")
+    parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="key.path=value")
 
-    Splits each image folder sequence into overlapping clips of `clip_len` frames.
-    Frames must be sorted by name (e.g. 00000.png, 00001.png, ...).
-    """
+    parser.add_argument("--tokenizer_ckpt", default=None, help="stage A weights (stage_a_tokenizer:best)")
+    parser.add_argument("--latent_action_ckpt", default=None, help="stage B weights")
+    parser.add_argument("--decoder_ckpt", default=None)
+    parser.add_argument("--resume", default=None, help="resume this stage from a checkpoint")
 
-    def __init__(self, root: str, clip_len: int = 8, stride: int = 4, image_size: int = 256):
-        self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ])
-        self.clip_len = clip_len
-        self.clips = []
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--precision", default=None, choices=["bf16", "fp16", "fp32"])
+    parser.add_argument("--grad_accum", type=int, default=None)
+    parser.add_argument("--list_stages", action="store_true")
+    args = parser.parse_args()
 
-        for seq_dir in Path(root).rglob("rgb_frames"):
-            frames = sorted(seq_dir.glob("*.png")) + sorted(seq_dir.glob("*.jpg"))
-            for start in range(0, len(frames) - clip_len, stride):
-                self.clips.append(frames[start : start + clip_len])
+    setup_logging()
+    if args.list_stages:
+        print("\n".join(STAGES.names()))
+        return 0
 
-        if not self.clips:
-            # Fallback: treat the root itself as a sequence
-            frames = sorted(Path(root).glob("*.png")) + sorted(Path(root).glob("*.jpg"))
-            for start in range(0, len(frames) - clip_len, stride):
-                self.clips.append(frames[start : start + clip_len])
+    stage_name = STAGE_ALIASES.get(args.stage, args.stage)
+    if stage_name not in STAGES:
+        parser.error(f"unknown stage {args.stage!r}; available: {STAGES.names()}")
 
-    def __len__(self):
-        return len(self.clips)
+    cfg = load_config(Path("world_model") / args.config if not Path(args.config).exists() else args.config)
+    cfg = apply_overrides(cfg, args.overrides)
+    for key in ("epochs", "batch_size", "precision", "grad_accum"):
+        if getattr(args, key) is not None:
+            cfg[key] = getattr(args, key)
+    cfg["seed"] = args.seed
 
-    def __getitem__(self, idx):
-        clip = [Image.open(p).convert("RGB") for p in self.clips[idx]]
-        return torch.stack([self.transform(f) for f in clip])  # (T, 3, H, W)
+    seed_everything(args.seed)
+    device = get_device(args.device)
+    print(f"device: {describe_device(device)}")
 
+    parent_ckpts = {}
+    for role, spec in (
+        ("tokenizer", args.tokenizer_ckpt),
+        ("latent_action", args.latent_action_ckpt),
+        ("decoder", args.decoder_ckpt),
+    ):
+        if spec:
+            parent_ckpts[role] = str(resolve_ckpt(spec, project="world_model"))
+            print(f"  {role:<14} <- {parent_ckpts[role]}")
 
-# ---------------------------------------------------------------------------
-# Training phases
-# ---------------------------------------------------------------------------
-
-def train_vqvae(args, model):
-    ds = ImageFolderDataset(args.data_dir, args.image_size)
-    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
-                        num_workers=args.num_workers, pin_memory=True)
-    optimizer = torch.optim.AdamW(model.vqvae.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-
-    log.info(f"Phase 1 — VQ-VAE training: {len(ds)} images, {args.epochs} epochs")
-    best_loss = float("inf")
-
-    for epoch in range(args.epochs):
-        model.vqvae.train()
-        ep_loss = 0.0
-
-        for batch in loader:
-            batch = batch.to(args.device)
-            _, loss, metrics = model.vqvae(batch)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.vqvae.parameters(), 1.0)
-            optimizer.step()
-            ep_loss += loss.item()
-
-        scheduler.step()
-        ep_loss /= len(loader)
-        log.info(f"Epoch {epoch+1}/{args.epochs} | loss={ep_loss:.4f}")
-
-        if ep_loss < best_loss:
-            best_loss = ep_loss
-            _save(model.vqvae, args.ckpt_dir / "vqvae_best.pt")
-
-    _save(model.vqvae, args.ckpt_dir / "vqvae_final.pt")
-    log.info("Phase 1 complete.")
-
-
-def train_dynamics(args, model):
-    if args.vqvae_ckpt:
-        model.vqvae.load_state_dict(torch.load(args.vqvae_ckpt, map_location=args.device))
-        log.info(f"Loaded VQ-VAE from {args.vqvae_ckpt}")
-
-    model.vqvae.eval()
-    for p in model.vqvae.parameters():
-        p.requires_grad_(False)
-
-    ds = VideoClipDataset(args.data_dir, clip_len=args.clip_len, image_size=args.image_size)
-    loader = DataLoader(ds, batch_size=args.batch_size // args.clip_len or 1,
-                        shuffle=True, num_workers=args.num_workers, pin_memory=True)
-    optimizer = torch.optim.AdamW(model.dynamics.parameters(), lr=args.lr, weight_decay=1e-4)
-
-    log.info(f"Phase 2 — Dynamics training: {len(ds)} clips, {args.epochs} epochs")
-    best_loss = float("inf")
-
-    for epoch in range(args.epochs):
-        model.dynamics.train()
-        ep_loss = 0.0
-
-        for clips in loader:
-            clips = clips.to(args.device)          # (B, T, 3, H, W)
-            B, T, C, H, W = clips.shape
-
-            with torch.no_grad():
-                flat = clips.reshape(B * T, C, H, W)
-                _, _, indices = model.vqvae.encode(flat)
-                h, w = indices.shape[1], indices.shape[2]
-                indices = indices.reshape(B, T, h, w)
-
-            loss = model.dynamics_loss(indices)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.dynamics.parameters(), 1.0)
-            optimizer.step()
-            ep_loss += loss.item()
-
-        ep_loss /= len(loader)
-        log.info(f"Epoch {epoch+1}/{args.epochs} | dynamics_loss={ep_loss:.4f}")
-
-        if ep_loss < best_loss:
-            best_loss = ep_loss
-            _save(model.dynamics, args.ckpt_dir / "dynamics_best.pt")
-
-    _save(model.dynamics, args.ckpt_dir / "dynamics_final.pt")
-    log.info("Phase 2 complete.")
-
-
-def train_decoder(args, model):
-    if args.vqvae_ckpt:
-        model.vqvae.load_state_dict(torch.load(args.vqvae_ckpt, map_location=args.device))
-
-    model.vqvae.eval()
-    for p in model.vqvae.parameters():
-        p.requires_grad_(False)
-
-    ds = ImageFolderDataset(args.data_dir, args.image_size)
-    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
-                        num_workers=args.num_workers, pin_memory=True)
-    optimizer = torch.optim.AdamW(model.decoder.parameters(), lr=args.lr, weight_decay=1e-4)
-
-    log.info(f"Phase 3 — Diffusion decoder training: {len(ds)} images, {args.epochs} epochs")
-    best_loss = float("inf")
-
-    for epoch in range(args.epochs):
-        model.decoder.train()
-        ep_loss = 0.0
-
-        for batch in loader:
-            batch = batch.to(args.device)
-
-            with torch.no_grad():
-                z_q, _, _ = model.vqvae.encode(batch)
-
-            loss = model.diffusion_loss(batch, z_q)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), 1.0)
-            optimizer.step()
-            ep_loss += loss.item()
-
-        ep_loss /= len(loader)
-        log.info(f"Epoch {epoch+1}/{args.epochs} | diffusion_loss={ep_loss:.4f}")
-
-        if ep_loss < best_loss:
-            best_loss = ep_loss
-            _save(model.decoder, args.ckpt_dir / "decoder_best.pt")
-
-    _save(model.decoder, args.ckpt_dir / "decoder_final.pt")
-    log.info("Phase 3 complete.")
-
-
-def _save(module, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(module.state_dict(), path)
-    log.info(f"  Saved → {path}")
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--data_dir", required=True)
-    p.add_argument("--phase", default="1", choices=["1", "2", "3", "all"])
-    p.add_argument("--image_size", type=int, default=256)
-    p.add_argument("--clip_len", type=int, default=8, help="Frames per clip for dynamics")
-    p.add_argument("--batch_size", type=int, default=16)
-    p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--num_workers", type=int, default=4)
-    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--ckpt_dir", type=Path, default=Path("checkpoints/world_model"))
-    p.add_argument("--vqvae_ckpt", default=None, help="Path to pre-trained VQ-VAE weights")
-    p.add_argument("--action_dim", type=int, default=0, help="0 = no action conditioning")
-    p.add_argument("--size", default="medium", choices=["small", "medium"])
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    args.device = torch.device(args.device)
-    args.ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-    from src.world_model.world_model import GenieWorldModel
-
-    model = (
-        GenieWorldModel.create_medium(args.action_dim, args.image_size)
-        if args.size == "medium"
-        else GenieWorldModel.create_small(args.action_dim, args.image_size)
+    run_name = args.run_name or f"{cfg.get('name', 'run')}-{config_hash(cfg, 6)}"
+    ctx = StageContext(
+        cfg=cfg, device=device, run_name=run_name, project="world_model", parent_ckpts=parent_ckpts
     )
-    model = model.to(args.device)
-    log.info(f"Model created ({args.size}), device={args.device}")
+    stage = STAGES.get(stage_name)(ctx)
 
-    phases = ["1", "2", "3"] if args.phase == "all" else [args.phase]
-    for phase in phases:
-        if phase == "1":
-            train_vqvae(args, model)
-            args.vqvae_ckpt = str(args.ckpt_dir / "vqvae_best.pt")
-        elif phase == "2":
-            train_dynamics(args, model)
-        elif phase == "3":
-            train_decoder(args, model)
+    missing = [r for r in stage.requires if r.split("_", 2)[-1] not in parent_ckpts and "tokenizer" not in parent_ckpts]
+    if missing and not parent_ckpts:
+        print(f"\nERROR: stage '{stage_name}' requires checkpoints from {list(stage.requires)}.", file=sys.stderr)
+        return 1
+
+    metrics = train_stage(
+        stage,
+        epochs=cfg.get("epochs", 50),
+        grad_accum=cfg.get("grad_accum", 1),
+        clip_grad_norm=cfg.get("clip_grad_norm", 1.0),
+        precision=cfg.get("precision", "bf16"),
+        log_every=cfg.get("log_every", 50),
+        eval_every_epochs=cfg.get("eval_every_epochs", 1),
+        save_every_epochs=cfg.get("save_every_epochs", 1),
+        ema_decay=cfg.get("ema_decay", 0.0),
+        resume=args.resume,
+    )
+    print(f"\n{stage_name} done: " + " ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
+    print(f"checkpoints: checkpoints/world_model/{stage_name}/{run_name}/")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

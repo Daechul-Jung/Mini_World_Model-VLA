@@ -1,0 +1,20 @@
+# Optional: simulation for VLA evaluation.
+#
+# This is the biggest gap in the project -- without a simulator every number is an
+# offline proxy. See src/vla/research/003_simulation_stack.md for why plain
+# Gymnasium/MuJoCo is the wrong target for real-robot-trained VLAs.
+#
+# Start with LIBERO (lighter, has published OpenVLA reference numbers), then add
+# SimplerEnv when a zero-shot pretrained-VLA baseline is needed.
+
+gymnasium>=0.29
+mujoco>=3.1
+imageio[ffmpeg]>=2.34     # rollout videos
+
+# LIBERO -- follow the upstream install; it pulls robosuite and its own assets:
+#   git clone https://github.com/Lifelong-Robot-Learning/LIBERO
+#   pip install -e LIBERO
+
+# SimplerEnv -- needs SAPIEN, heavier:
+#   git clone https://github.com/simpler-env/SimplerEnv
+#   pip install -e SimplerEnv

@@ -1,0 +1,57 @@
+# RL post-training inside the world model.
+#
+# Prerequisites, in order. Skipping any of them produces a run that trains and
+# means nothing:
+#   1. A BC policy with a STOCHASTIC head (gaussian or discrete_bins). A
+#      continuous_mse head has no density and no policy gradient exists.
+#   2. A world model whose action space matches the policy's. Prefer stage C
+#      trained with action_kind=robot -- then no translation is needed at all.
+#   3. A reward you have sanity-checked on REAL rollouts before letting a policy
+#      optimise it. An unchecked reward on generated pixels will be hacked.
+
+name: rl_in_dream
+
+policy_ckpt: stage_bc:best      # the BC checkpoint to post-train
+reference_policy: same          # KL anchor; "same" = a frozen copy of policy_ckpt
+
+world_model:
+  config: world_model/genie_small_openx.yaml
+  tokenizer_ckpt: stage_a_tokenizer:best
+  dynamics_ckpt: stage_c_dynamics:best
+  render: tokenizer             # "decoder" is ~25x slower; not for an RL loop
+
+action_translator:
+  name: identity                # matches action_kind=robot. Use learned_projector
+                                # only if the dynamics model is latent-conditioned.
+
+reward:
+  name: ensemble
+  disagreement_penalty: 0.5     # discourage regions where the rewards disagree
+  normalize: true
+  components:
+    - name: goal_image
+      mode: delta
+      scale: 1.0
+
+env:
+  max_steps: 16                 # SHORT. Compounding dynamics error makes late
+                                # steps unreliable and the reward meaningless.
+  batch_size: 32                # imagined episodes are cheap; run many
+  context_frames: 4
+
+algorithm:
+  name: ppo
+  kl_coef: 0.05                 # do not set to 0 -- see src/vla/rl/base.py
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  epochs_per_batch: 4
+  lr: 1.0e-5                    # much lower than BC: this is a fine-tune
+
+iterations: 200
+precision: bf16
+
+# Validation. In-dream return is NOT a result. Re-measure in a real simulator
+# every `validate_every` iterations, and report that number instead.
+validate_every: 20
+validate_env: simpler_env       # see src/vla/research/003_simulation_stack.md

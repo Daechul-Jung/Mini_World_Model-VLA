@@ -1,0 +1,26 @@
+# Stage A ONLY, on LSUN room stills.
+#
+# LSUN bedroom is 5000 unordered photographs of different rooms. There is no
+# next frame, so it cannot train the latent action model (stage B) or the
+# dynamics model (stage C) -- running those against this config is a category
+# error, not a tuning problem.
+#
+# It IS useful for stage A: more visual variety than TUM alone means better
+# codebook coverage. Train the tokenizer on both, then do stages B/C on video.
+
+_base_: world_model/genie_small.yaml
+name: genie_small_lsun_stage_a
+
+data:
+  _replace_: true      # switch dataset wholesale; do not inherit clip_len etc.
+  name: images
+  roots: [data/lsun_rooms, data/tum_rgbd]
+  image_size: 128
+  exclude: [depth]
+  augment: true
+  num_workers: 4
+  val_fraction: 0.02
+
+batch_size: 32
+grad_accum: 1
+epochs: 40

@@ -1,0 +1,53 @@
+# Octo-style policy trained from scratch on the OpenX pick-and-place subset.
+#
+# ~30M params, comparable to Octo-Small (27M). Start here, not at octo_medium:
+# with ~100 episodes the bottleneck is data, and a larger trunk just overfits
+# faster. Expect this to learn the pipeline, not to produce a competent robot
+# policy -- Octo was trained on 800k trajectories.
+
+name: octo_small_openx
+
+policy:
+  name: octo_small
+  action_dim: 4                 # UCSD pick-place: [dx, dy, dz, gripper]
+  action_chunk: 4               # predict 4, execute 1 (receding horizon)
+  obs_horizon: 2
+  image_size: 128
+  dim: 384
+  depth: 12
+  num_heads: 6
+  language_encoder: hash        # "t5" for a frozen T5-small (needs transformers)
+  head:
+    name: continuous_mse        # switch to gaussian before any RL post-training
+    hidden: 512
+    loss_type: huber
+    gripper_index: -1
+    gripper_weight: 2.0         # the dim that decides success; do not let it average away
+  modules: []                   # <- insert research modules here
+
+freeze_backbone: false
+
+data:
+  name: openx_npz
+  root: data/openx
+  image_size: 128
+  obs_horizon: 2
+  action_chunk: 4
+  stride: 1
+  instruction_filter: null      # "pick" restricts to pick-and-place phrasings
+  gripper_index: -1
+  augment: true
+  num_workers: 4
+  val_fraction: 0.1             # split is BY EPISODE, not by window
+
+epochs: 60
+batch_size: 32
+grad_accum: 1
+precision: bf16
+clip_grad_norm: 1.0
+
+optim:
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 200
+  schedule: cosine

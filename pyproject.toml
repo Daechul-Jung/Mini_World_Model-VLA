@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-world-model-vla"
+version = "0.2.0"
+description = "Genie-style world model + Octo/OpenVLA-style VLA, composed from swappable parts"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# The vendored Octo port is a work in progress and is not linted.
+extend-exclude = ["src/vla/backbones/octo/components", "src/vla/backbones/octo/octo_module.py", "src/vla/backbones/octo/octo_model.py", "src/vla/backbones/octo/utils"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "B008"]

@@ -1,0 +1,53 @@
+# OpenVLA-7B frozen, with a trainable adapter stack and action head.
+#
+# This is NOT fine-tuning OpenVLA. Full fine-tuning needs ~150 GB and LoRA needs
+# ~27 GB; neither fits an 8 GB 4070 Laptop. What fits is: load 4-bit, freeze, and train
+# a small module stack plus a head on top of its features. Say it that way in any
+# writeup -- it is a frozen-features protocol, which is a legitimate and clearly
+# different claim.
+#
+# Requires: pip install -r requirements-vla.txt (transformers, bitsandbytes, peft)
+# First run downloads ~15 GB. Set HF_HOME to a disk with room.
+
+name: openvla_frozen_adapter
+
+policy:
+  name: openvla
+  model_name: openvla/openvla-7b
+  load_in_4bit: true
+  freeze_backbone: true
+  feature_layer: -1             # try -8: the last layer is specialised for action tokens
+  action_dim: 4
+  action_chunk: 1               # OpenVLA is single-step
+  image_size: 224
+  head:
+    name: continuous_mse
+    hidden: 1024
+    gripper_index: -1
+    gripper_weight: 2.0
+  modules:
+    - name: bottleneck_adapter
+      bottleneck: 128
+      dropout: 0.1
+
+freeze_backbone: true
+
+data:
+  name: openx_npz
+  root: data/openx
+  image_size: 224
+  obs_horizon: 1                # must match the policy: OpenVLA sees one frame
+  action_chunk: 1
+  augment: false
+  num_workers: 2
+  val_fraction: 0.1
+
+epochs: 20
+batch_size: 4
+grad_accum: 8                   # effective batch 32; the backbone dominates VRAM
+precision: bf16
+
+optim:
+  lr: 1.0e-3                    # higher than full fine-tuning: only the adapter trains
+  weight_decay: 1.0e-4
+  warmup_steps: 100

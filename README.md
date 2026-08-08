@@ -1,252 +1,203 @@
 # Mini World Model + VLA
 
-Personal research code for studying diffusion models, Octo-style VLA models, and small generative world models for rooms.
+Personal research code for two things and the bridge between them:
 
-The current direction is:
+1. **A vision-language-action policy** — an Octo-style transformer trained from
+   scratch on an Open X-Embodiment pick-and-place subset, plus large pretrained
+   backbones (OpenVLA, π0) loaded frozen with new trainable layers on top.
+2. **A Genie-style generative world model** — video tokenizer → latent action
+   model → action-conditioned dynamics → optional diffusion decoder, trained one
+   component at a time.
+3. **The bridge** — using the world model as an RL environment to post-train the
+   VLA.
 
-1. **Image diffusion**: latent diffusion for room image generation.
-2. **World model**: video-token world model that predicts future room frames, with a diffusion decoder for pixels.
-3. **3D room model**: Gaussian Splatting from TUM RGB-D or personal room video.
-4. **VLA**: PyTorch Octo-style model trained first on a small Open X-Embodiment task subset.
+Everything is built around one property: **a new idea should be a new file plus a
+config line, never a fork of a training loop.**
 
-The VLA/Octo implementation lives under `src/vla/` and is intentionally separate while it is being studied.
+Runs on a single RTX 4070 Laptop (7.7 GiB).
 
-## Main Ideas
+---
 
-### Diffusion Model
+## Design
 
-For image generation, use a latent diffusion model:
+Every component category has an abstract contract, a registry, and one file per
+implementation. Configs refer to components by name.
 
-```text
-room image -> VAE latent -> UNet denoising diffusion -> generated latent -> VAE decoder -> image
+**VLA** — `backbone → modules → head`:
+
+```
+Observation ──▶ [ backbone ] ──▶ features ──▶ [ modules ] ──▶ [ head ] ──▶ Action
+                 frozen or         (B,T,D)     your new         action
+                 trained                       layers           parameterisation
 ```
 
-Good starter data:
+**World model** — four components, four training stages, four checkpoints:
 
-- **LSUN bedroom/living_room/kitchen**: good for room images, but full categories are large.
-- **ADE20K / Places-style indoor images**: useful smaller indoor-scene alternatives.
-- **ImageNet subset**: useful for learning image generation mechanics, but not ideal for room geometry.
-- **Personal room photos/video frames**: best for generating your own room style.
-
-### World Model
-
-The world model is trained from **videos or ordered image sequences**, not isolated 2D images. ImageNet can help train an image prior, but it is not enough by itself to learn a navigable 3D world because it has no camera motion, temporal continuity, depth, or action labels.
-
-Current world model:
-
-```text
-video frames -> VQ-VAE tokenizer -> discrete frame tokens
-tokens/actions -> causal dynamics transformer -> next-frame tokens
-next-frame tokens -> diffusion decoder -> generated future frame
+```
+frames ──▶ [ tokenizer ] ──▶ tokens ─┐
+                                     ├──▶ [ dynamics ] ──▶ next tokens ──▶ [ decoder ] ──▶ pixels
+frames ──▶ [ latent action ] ──▶ a_t ┘
 ```
 
-For better 3D room results, add geometry:
+The architecture follows the **published Genie 1 paper** (arXiv:2402.15391).
+Genie 3 has no architecture paper — only a capability blog post — so its stated
+capabilities (720p, 24 fps, minute-long consistency) are treated as targets
+rather than as a spec.
 
-```text
-RGB-D frames + poses -> 3D Gaussian Splatting -> render novel views
-video tokens + diffusion -> predict/generate future appearance
+List everything currently registered:
+
+```bash
+python scripts/tools/list_components.py
 ```
 
-### 3D Gaussian Splatting
+---
 
-The project now includes a small `gsplat` path:
+## Layout
 
-- `src/world_model/splatting/gaussians.py`: learnable Gaussian scene and renderer wrapper.
-- `scripts/train/train_gaussian_splatting.py`: small TUM RGB-D trainer.
-
-TUM RGB-D is easier than personal video because it includes RGB, depth, camera intrinsics, and ground-truth camera poses. Personal video can work, but you need camera poses from COLMAP/SLAM, and monocular video has less reliable scale/depth than RGB-D.
-
-## Project Structure
-
-```text
-Mini_World_Model-VLA/
-├── README.md
-├── requirements.txt
-├── requirements-openx.txt
-├── configs/
-│   ├── diffusion/ldm_medium.yaml
-│   ├── vla_configs.yaml
-│   └── world_model/genie_medium.yaml
-├── scripts/
-│   ├── download/
-│   │   ├── download_tum_rgbd.py
-│   │   ├── download_lsun_rooms.py
-│   │   ├── download_openx_subset.py
-│   │   └── prepare_imagenet_subset.py
-│   └── train/
-│       ├── train_diffusion.py
-│       ├── train_world_model.py
-│       └── train_gaussian_splatting.py
-├── src/
-│   ├── diffusion/
-│   │   ├── ldm.py
-│   │   ├── schedulers/
-│   │   └── vae/
-│   ├── world_model/
-│   │   ├── world_model.py
-│   │   ├── tokenizer/
-│   │   ├── dynamics/
-│   │   ├── decoder/
-│   │   └── splatting/
-│   ├── dataset/
-│   └── vla/
-└── data/
-    ├── tum_rgbd/
-    ├── lsun_rooms/
-    ├── openx/
-    └── imagenet_subset/
 ```
+src/
+├── common/            registry, config, checkpoint lineage, stage runner, trainer
+├── vla/               core / backbones / modules / heads / data / training / rl / eval
+├── world_model/       core / tokenizer / latent_action / dynamics / decoder
+│                      / memory / physics / data / training / eval
+├── bridge/            action translation, world-model env, reward models
+└── diffusion/         standalone latent-diffusion study (image prior)
+
+configs/               one YAML per model size and data source
+scripts/               download / train / eval / tools
+tests/                 contract tests — CPU, seconds
+```
+
+---
 
 ## Install
 
-Use your normal PyTorch environment for diffusion, world model, and 3DGS:
-
 ```bash
-python3 -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt          # core: torch, torchvision, numpy, pyyaml
+python3 -m pip install -r requirements-vla.txt      # optional: OpenVLA / π0 (large downloads)
+python3 -m pip install -r requirements-sim.txt      # optional: simulation for evaluation
 ```
 
-Use a separate environment for OpenX/TFDS downloads:
+Open X-Embodiment downloads need a separate environment, because TFDS pins
+NumPy < 2:
 
 ```bash
-# On Ubuntu/Debian, install this first if venv creation has no pip:
-# sudo apt install python3.10-venv
 python3 -m venv venv_openx_download
 ./venv_openx_download/bin/python -m pip install -r requirements-openx.txt
 ```
 
+---
+
+## Data
 
 ```bash
-which python3
-python3 -m pip --version
-python3 -c "import torch, numpy; print(torch.__version__, numpy.__version__)"
-```
-
-In this workspace, `venv_openx_download` existed but had no `pip`, and `ensurepip` is unavailable because the system Python is missing the Debian/Ubuntu `python3.10-venv` package. Install that package, recreate the venv, then install `requirements-openx.txt`.
-
-## Download Data
-
-### TUM RGB-D for world model and 3DGS
-
-You already installed `fr1_desk` and `fr2_desk`, so the default command does not include `fr3_desk` or `fr3_office`.
-
-```bash
-python3 scripts/download/download_tum_rgbd.py \
-    --sequences fr1_desk fr2_desk \
-    --output_dir data/tum_rgbd
-```
-
-This exports:
-
-```text
-data/tum_rgbd/fr1_desk/rgb_frames/
-data/tum_rgbd/fr1_desk/depth_frames/
-data/tum_rgbd/fr1_desk/poses.txt
-data/tum_rgbd/fr1_desk/intrinsics.json
-```
-
-### OpenX subset for VLA
-
-Start with UCSD pick-and-place:
-
-```bash
+# Robot episodes for the VLA (and for an action-conditioned world model)
 ./venv_openx_download/bin/python scripts/download/download_openx_subset.py \
-    --dataset ucsd_pick_place \
-    --n_episodes 100 \
-    --output_dir data/openx
+    --dataset ucsd_pick_place --n_episodes 100 --output_dir data/openx
+
+# Video with camera motion, depth and ground-truth poses
+python3 scripts/download/download_tum_rgbd.py --sequences fr1_desk fr2_desk \
+    --output_dir data/tum_rgbd
+
+# Room stills — tokenizer training only
+python3 scripts/download/download_lsun_rooms.py --categories bedroom \
+    --n_images 5000 --output_dir data/lsun_rooms
 ```
 
-Use `--n_episodes 500` later if the first run works and storage is okay.
+What each source can train:
 
-### LSUN rooms for image diffusion
+| Source | Stage A (tokenizer) | Stage B (latent action) | Stage C (dynamics) |
+|--------|:---:|:---:|:---:|
+| LSUN rooms (stills) | yes | **no** | **no** |
+| TUM RGB-D (video) | yes | yes | yes |
+| OpenX episodes (video + actions) | yes | yes | yes |
 
-```bash
-python3 scripts/download/download_lsun_rooms.py \
-    --categories bedroom living_room kitchen \
-    --n_images 5000 \
-    --output_dir data/lsun_rooms
-```
+LSUN is an unordered collection of photographs of *different* rooms. There is no
+next frame, so it cannot train anything temporal.
 
-LSUN full downloads are large. For a personal GPU, 5k-20k images is enough to study the pipeline.
-
-### ImageNet subset
-
-ImageNet usually requires manually accepting terms and downloading from the official source. After extracting ImageNet train folders:
-
-```bash
-python3 scripts/download/prepare_imagenet_subset.py \
-    --imagenet_root /path/to/imagenet/train \
-    --output_dir data/imagenet_subset \
-    --classes 50 \
-    --images_per_class 100
-```
+---
 
 ## Train
 
-### Latent diffusion for room images
+Components are trained one at a time; each stage loads its predecessors frozen
+and writes its own checkpoint.
 
 ```bash
-python3 scripts/train/train_diffusion.py \
-    --data_dir data/lsun_rooms \
-    --phase all \
-    --epochs 50 \
-    --batch_size 16
+# World model
+python scripts/train/train_world_model.py --stage a --config genie_small_lsun.yaml
+python scripts/train/train_world_model.py --stage b --config genie_small.yaml
+python scripts/train/train_world_model.py --stage c --config genie_small.yaml \
+    --tokenizer_ckpt stage_a_tokenizer:best \
+    --latent_action_ckpt stage_b_latent_action:best
+python scripts/train/train_world_model.py --stage d --config genie_small.yaml \
+    --tokenizer_ckpt stage_a_tokenizer:best
+
+# VLA
+python scripts/train/train_vla.py --stage bc --config octo_small.yaml
+python scripts/train/train_vla.py --stage bc --config openvla_frozen_adapter.yaml
 ```
 
-### Tokenized video world model
+`stage_a_tokenizer:best` resolves to the newest run's best checkpoint. Override
+any config value inline — values parse as YAML, so lists and dicts work:
 
 ```bash
-python3 scripts/train/train_world_model.py \
-    --data_dir data/tum_rgbd \
-    --phase all \
-    --size small \
-    --epochs 20 \
-    --batch_size 8
+python scripts/train/train_vla.py --stage bc --config octo_small.yaml \
+    --set optim.lr=1e-4 \
+    --set 'policy.modules=[{"name": "gated_residual", "num_heads": 6}]'
 ```
 
-Use `--size medium` after the small path is working.
-
-### 3D Gaussian Splatting room model
+Checkpoints land in `checkpoints/<project>/<stage>/<run>/` with `config.yaml`,
+`manifest.json`, `metrics.jsonl`, `best.pt` and `last.pt`. Each records the
+checkpoints it was built from:
 
 ```bash
-python3 scripts/train/train_gaussian_splatting.py \
-    --sequence_dir data/tum_rgbd/fr1_desk \
-    --steps 1000 \
-    --max_points 50000 \
-    --image_size 256
+python scripts/tools/inspect_checkpoint.py stage_c_dynamics:best
 ```
 
-This is a learning implementation, not a full production 3DGS trainer. It is useful for understanding the components and getting a small room reconstruction loop running.
-Training needs a CUDA GPU because `gsplat` rasterization is GPU-oriented.
-
-## Personal Room Video
-
-Personal video is a good next step. For the frame-prediction world model:
+Check a config's memory cost before starting a long run:
 
 ```bash
-mkdir -p data/myroom/rgb_frames
-ffmpeg -i room.mp4 -vf fps=10 data/myroom/rgb_frames/%05d.png
-python3 scripts/train/train_world_model.py --data_dir data/myroom --phase all --size small
+python scripts/tools/vram_probe.py --project vla --config octo_medium.yaml
 ```
 
-For 3DGS from personal video, first estimate camera poses and sparse points with COLMAP or another SLAM system, then initialize Gaussian Splatting from that geometry. If you record RGB-D video, the path is much easier because depth gives direct 3D points.
+---
 
-## Practical Training Order
+## Test
 
-1. Train/test LDM on a tiny LSUN or personal-room image subset.
-2. Train/test world-model VQ-VAE on TUM `fr1_desk`.
-3. Train the dynamics transformer on short clips from `fr1_desk` and `fr2_desk`.
-4. Train the diffusion decoder for sharper imagined frames.
-5. Train 3DGS on `fr1_desk` to get novel-view room rendering.
-6. Train VLA on `ucsd_pick_place` subset.
-7. Later connect VLA/RL rollouts to generated frames or rendered 3DGS views.
+```bash
+python -m pytest tests/ -q
+```
+
+These are contract tests, not accuracy tests — they check that every registered
+component honours its interface, which is what makes swapping components safe.
+They run on CPU in seconds.
+
+---
+
+## Current status
+
+| | Status |
+|--|--------|
+| World model stages A–D | train end-to-end, checkpoints chain correctly |
+| VLA behaviour cloning | trains on the OpenX subset |
+| Pretrained backbones (OpenVLA, π0) | implemented, not yet run against downloaded weights |
+| RL post-training | contracts only |
+| **Simulator evaluation** | **not built — the largest gap** |
+
+Without a simulator there is no success rate, and offline action error correlates
+only weakly with task success. That is the next piece of work.
+
+---
 
 ## References
 
-- Octo: https://octo-models.github.io/
-- Open X-Embodiment / RT-X: https://robotics-transformer-x.github.io/
-- TensorFlow Datasets catalog: https://www.tensorflow.org/datasets/catalog/overview
-- TUM RGB-D: https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download
-- LSUN: https://www.yf.io/p/lsun
-- Latent Diffusion Models: https://arxiv.org/abs/2112.10752
-- 3D Gaussian Splatting: https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
-- Genie: https://arxiv.org/abs/2402.15391
+- Genie: Generative Interactive Environments — https://arxiv.org/abs/2402.15391
+- Genie 3 (capabilities, no architecture) — https://deepmind.google/blog/genie-3-a-new-frontier-for-world-models/
+- Octo — https://octo-models.github.io/
+- OpenVLA — https://arxiv.org/abs/2406.09246
+- π0 — https://arxiv.org/abs/2410.24164
+- Open X-Embodiment / RT-X — https://robotics-transformer-x.github.io/
+- SimplerEnv — https://simpler-env.github.io/
+- LIBERO — https://libero-project.github.io/
+- Latent Diffusion — https://arxiv.org/abs/2112.10752
+- TUM RGB-D — https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download
